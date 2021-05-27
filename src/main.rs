@@ -96,6 +96,8 @@ fn collect_edges(mesh: &TriangleMesh) -> Vec<Edge> {
     res.sort();
     res
 }
+
+#[derive(Clone)]
 struct Img {
     color: Vec<Vec3>,
     width: i32,
@@ -177,7 +179,7 @@ fn compute_interior_derivatives(
     adj: &Img,
     ispp: i32,
     rng: &mut MyRng,
-    d_colors: &mut Vec<Vec3>,
+    d_colors: &mut Img,
 ) {
     let sqrt_spp = ((ispp as f32).sqrt()) as i32;
     let spp = sqrt_spp * sqrt_spp;
@@ -190,7 +192,7 @@ fn compute_interior_derivatives(
                     let screen_pos = Vec2::new(x as f32 + xoff, y as f32 + yoff);
                     let (_, idx) = raytrace(mesh, &screen_pos);
                     if idx >= 0 {
-                        d_colors[idx as usize] +=
+                        d_colors.color[(y * adj.width + x) as usize] +=
                             adj.color[(y * adj.width + x) as usize] / (spp as f32);
                     }
                 }
@@ -206,9 +208,7 @@ fn compute_edge_derivatives(
     adj: &Img,
     espp: i32,
     rng: &mut MyRng,
-    screen_dx: &mut Img,
-    screen_dy: &mut Img,
-    d_vertices: &mut Vec<Vec2>,
+    d_vertices: &mut Vec<(Img, Img)>,
 ) {
     for _ in 0..espp {
         let edge_id = sample(&edge_sampler, sample_1d(rng));
@@ -228,16 +228,17 @@ fn compute_edge_derivatives(
         let (color_out, _) = raytrace(mesh, &(p + 1e-3f32 * n));
         let pdf = pmf / ((v1 - v0).length());
         let weight = 1.0 / (pdf * espp as f32);
-        let adj_v = (color_in - color_out).dot(adj.color[(yi * adj.width + xi) as usize]);
-        let d_v0 = adj_v * weight * Vec2::new((1.0 - t) * n.x, (1.0 - t) * n.y);
-        let d_v1 = adj_v * weight * Vec2::new(t * n.x, t * n.y);
-        let dx = -n.x * (color_in - color_out) * weight;
-        let dy = -n.y * (color_in - color_out) * weight;
+        let adj_v = (color_in - color_out) * (adj.color[(yi * adj.width + xi) as usize]);
+        let d_v0_x = adj_v * weight * (1.0 - t) * n.x;
+        let d_v0_y = adj_v * weight * (1.0 - t) * n.y;
+        let d_v1_x = adj_v * weight * t * n.x;
+        let d_v1_y = adj_v * weight * t * n.y;
         let idx = (yi * adj.width + xi) as usize;
-        screen_dx.color[idx] += dx;
-        screen_dy.color[idx] += dy;
-        d_vertices[edge.v0 as usize] += d_v0;
-        d_vertices[edge.v1 as usize] += d_v1;
+        d_vertices[edge.v0 as usize].0.color[idx] += d_v0_x;
+        d_vertices[edge.v0 as usize].1.color[idx] += d_v0_y;
+
+        d_vertices[edge.v1 as usize].0.color[idx] += d_v1_x;
+        d_vertices[edge.v1 as usize].1.color[idx] += d_v1_y;
     }
 }
 fn d_render(
@@ -246,24 +247,15 @@ fn d_render(
     ispp: i32,
     espp: i32,
     rng: &mut MyRng,
-    screen_dx: &mut Img,
-    screen_dy: &mut Img,
-    d_mesh: &mut DTriangleMesh,
+    d_colors: &mut Img,
+    d_vertices: &mut Vec<(Img, Img)>, //screen_dx: &mut Img,
+                                      //screen_dy: &mut Img,
+                                      //d_mesh: &mut DTriangleMesh
 ) {
-    compute_interior_derivatives(mesh, adj, ispp, rng, &mut d_mesh.colors);
+    compute_interior_derivatives(mesh, adj, ispp, rng, d_colors);
     let edges = collect_edges(mesh);
     let edge_sampler = build_edge_sampler(mesh, &edges);
-    compute_edge_derivatives(
-        mesh,
-        &edges,
-        &edge_sampler,
-        adj,
-        espp,
-        rng,
-        screen_dx,
-        screen_dy,
-        &mut d_mesh.vertices,
-    );
+    compute_edge_derivatives(mesh, &edges, &edge_sampler, adj, espp, rng, d_vertices);
 }
 
 fn main() {
@@ -289,37 +281,43 @@ fn main() {
         Ok(_) => println!("write success to {}", filename),
     };
     let adj_img = Img::new(256, 256, Vec3::new(1., 1., 1.));
-    let mut dx = Img::new(256, 256, Vec3::new(0., 0., 0.));
-    let mut dy = Img::new(256, 256, Vec3::new(0., 0., 0.));
-    let mut d_mesh = DTriangleMesh::new(mesh.vertices.len() as i32, mesh.colors.len() as i32);
+    let mut d_colors = Img::new(256, 256, Vec3::new(0., 0., 0.));
+    let vertex_num = mesh.vertices.len();
+    let mut d_vertices = vec![
+        (
+            Img::new(256, 256, Vec3::new(0., 0., 0.)),
+            Img::new(256, 256, Vec3::new(0., 0., 0.))
+        );
+        vertex_num
+    ];
     d_render(
         &mesh,
         &adj_img,
         4,                      /* interior_samples_per_pixel */
         img.width * img.height, /* edge_samples_in_total */
         &mut rng,
-        &mut dx,
-        &mut dy,
-        &mut d_mesh,
+        &mut d_colors,
+        &mut d_vertices,
     );
-    let filename = "dx_pos.ppm";
-    match save_img(&dx, filename, false) {
+    let filename = "d_colors.ppm";
+    match save_img(&d_colors, filename, false) {
         Err(why) => println!("{}", why),
         Ok(_) => println!("write success to {}", filename),
     };
-    let filename = "dx_neg.ppm";
-    match save_img(&dx, filename, true) {
-        Err(why) => println!("{}", why),
-        Ok(_) => println!("write success to {}", filename),
-    };
-    let filename = "dy_pos.ppm";
-    match save_img(&dy, filename, false) {
-        Err(why) => println!("{}", why),
-        Ok(_) => println!("write success to {}", filename),
-    };
-    let filename = "dy_neg.ppm";
-    match save_img(&dy, filename, true) {
-        Err(why) => println!("{}", why),
-        Ok(_) => println!("write success to {}", filename),
-    };
+
+    let mut i = 0;
+    for d_vertice in d_vertices.into_iter(){
+        let (dx,dy) = d_vertice;
+        let filename = format!("v{}dx.ppm",i);
+        match save_img(&dx, &filename, false) {
+            Err(why) => println!("{}", why),
+            Ok(_) => println!("write success to {}", filename),
+        };
+        let filename = format!("v{}dy.ppm",i);
+        match save_img(&dy, &filename, false) {
+            Err(why) => println!("{}", why),
+            Ok(_) => println!("write success to {}", filename),
+        };
+        i+=1;
+    }
 }
