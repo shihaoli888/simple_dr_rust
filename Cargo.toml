@@ -1,0 +1,11 @@
+[package]
+name = "simple_dr"
+version = "0.1.0"
+authors = ["Li.Shihao <li.shihao@rendering-zju.edu.cn>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+glam = "0.15.2"
+rand = "0.8.3"
